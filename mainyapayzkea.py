@@ -10,6 +10,8 @@ import subprocess
 import playsound
 from gtts import gTTS
 import io
+import os
+from openai import OpenAI
 import sys
 from pytube import Search
 import tkinter as tk
@@ -32,6 +34,10 @@ import numpy as np
 import speech_recognition as sr
 from deep_translator import GoogleTranslator
 from tempfile import NamedTemporaryFile
+import requests
+
+# Hugging Face API bilgileri
+
 class EvAsistaniGUI:
     def __init__(self, asistan):
         self.asistan = asistan  
@@ -99,9 +105,15 @@ class EvAsistaniGUI:
 class EvAsistani:
     def __init__(self, isim="EgeDa" ,karakter="arkadaşça"):
         self.isim = isim
+        self.gui = gui = None
         self.gorevler = []
+        self.messages = []
         self.karakter = karakter
         self.alisveris_listesi = []
+        self.client = OpenAI(
+            base_url="https://router.huggingface.co/v1",
+            api_key="*****************",
+        )
         self.notlar = []
         self.recognizer = sr.Recognizer()
         self.hafizayi_yukle()   
@@ -110,6 +122,9 @@ class EvAsistani:
         self.awaiting_alisveris = False
         self.awaiting_youtube = False
         self.reading_haber = False
+        self.awaiting_hatirlatici = False
+        self.hatirlatici_step = None
+        self.hatirlatici_konu = None
         self.komutlar = {
             "dosya oluştur": self.dosya_olustur,
             "selam": self.selamla,
@@ -139,15 +154,15 @@ class EvAsistani:
             "bugün hava nasıl": lambda komut=None: self.hava_durumu_google("Bilecik"),
             "çeviri yap": self.ceviri_yap,
             "dosya aç": self.dosya_ac,
-            "müzik açabilir misin": self.muzik_youtube_ac,
             "bugün güncel haberleri sıralayabilir misin": self.bugun_ne_var,
             "bugün haberlerde ne var": self.bugun_ne_var,
             "yapacaklarım": self.gorevleri_listele,
             "şaka yap": self.saka_yap,
-            "zamanlayıcı": self.zamanlayici,
             "alarm kur": self.alarm_kur,
             "bilgi ver": self.bilgi_ver,
             "rastgele sayı": self.rastgele_sayi,
+            "hatırlatıcı": self.hatirlatici_kur,
+            "hatirlatici": self.hatirlatici_kur,
             "sözlük": self.so_zluk,
             "hakkında": self.hakkinda,
             "çıkış": self.cikis,
@@ -172,9 +187,23 @@ class EvAsistani:
             " İlacımı hatırlat": self.ilac_hatirlat,
             "i̇lacımı hatırlat": self.ilac_hatirlat,
             " i̇lacımı hatırlatabilir misin": self.ilac_hatirlat,
+            "yeter": self.stop_reading,
+            "dur": self.stop_reading,
+            "okumayı durdur": self.stop_reading,
+            "okumayi durdur": self.stop_reading,
+            " bana İlacımı hatırlatabilir misin": self.ilac_hatirlat,
+            "kes": self.stop_reading,
+            "sus": self.stop_reading,
+            "teşekkür ederim": self.stop_reading,
+            "müzik aç": self.muzik_ac,
+            "müzik oynat": self.muzik_ac,
+            "müziği aç": self.muzik_ac,
+            "müzik kapat": self.muzik_kapat,
+            "müziği kapat": self.muzik_kapat,
+            "kapat": self.muzik_kapat
 
-            " bana İlacımı hatırlatabilir misin": self.ilac_hatirlat
         }
+
         self.keyword_triggers = {
             "dosya": self.dosya_olustur,
             "selam": self.selamla,
@@ -182,22 +211,21 @@ class EvAsistani:
             "tarih": self.tarih_soyle,
             "arama": self.arama_yap,
             "ip": self.ip_adresim,
+            "aypi": self.ip_adresim,
             "rastgele_kelime": self.rastgele_kelime,
             "faktoriyel": self.faktoriyel_hesapla,
             "karekök": self.karekok_hesapla,
-            "not": self.not_al,
-            "notlari_goster": self.notlari_goster,
-            "alışveriş": self.alisveris_ekle,
-            "alışveriş_goster": self.alisveris_goster,
+            "not al": self.not_al,
+            "notları göster": self.notlari_goster,
+            "alışveriş ekle ": self.alisveris_ekle,
+            "alışveriş listesi göster": self.alisveris_goster,
             "görev": self.gorev_ekle,
-            "görevler": self.gorevleri_listele,
+            "görevleri listele": self.gorevleri_listele,
             "hava": lambda komut=None: self.hava_durumu_google("Bilecik"),
             "çeviri": self.ceviri_yap,
             "dosya_ac": self.dosya_ac,
-            "müzik": self.muzik_youtube_ac,
             "haber": self.bugun_ne_var,
             "şaka": self.saka_yap,
-            "zamanlayıcı": self.zamanlayici,
             "alarm": self.alarm_kur,
             "bilgi": self.bilgi_ver,
             "rastgele_sayı": self.rastgele_sayi,
@@ -218,8 +246,11 @@ class EvAsistani:
             "yardım": self.yardim_goster,
             "hafıza_kaydet": self.hafizayi_kaydet,
             "hafıza_yükle": self.hafizayi_yukle,
+            "hatırlatıcı": self.hatirlatici_kur,
+            "hatirlatici": self.hatirlatici_kur,
             "ilaç": self.ilac_hatirlat
-        }   
+        }
+
         self.onceden_tanimli_cevaplar = {
             "napıyon": "Ben kodlarımı çalıştırıyorum, sen napıyorsun?",
             "hangi takımı tutuyorsun": "Ben bir yapay zekayım, tarafsızım ama senin takımını merak ettim!",
@@ -261,6 +292,7 @@ class EvAsistani:
             "saat kaç oldu": "Şu an saat: " + datetime.datetime.now().strftime("%H:%M"),
             "bugün günlerden ne": "Bugün günlerden: " + datetime.datetime.now().strftime("%A"),
             "helal olsun be":"Teşekkür ederim",
+            "sıkıldım": "Merak etme, sana yardımcı olabileceğim şeyler var. Müzik dinleteyim, haber okuyayım, bir şaka yapayım veya sohbet edelim. Ne yapmak istersin?",
             "hangi gün": "Bugün: " + datetime.datetime.now().strftime("%A"),
             "hangi ay": "Bu ay: " + datetime.datetime.now().strftime("%B"),
             "hangi yıl": "Bu yıl: " + datetime.datetime.now().strftime("%Y"),
@@ -296,7 +328,7 @@ class EvAsistani:
             "sen yapay zekasın": "Evet, doğru! Ben bir yapay zekayım.",
             "bana hikaye anlat": "Bir zamanlar uzak diyarlarda...",
             "bana şiir oku": "Gökyüzünde yıldızlar parlar...",
-            "bana istiklal marşını oku":"""Korkma, sönmez bu şafaklarda yüzen al sancak;
+            "bana i̇stiklal marşı'nı oku":"""Korkma, sönmez bu şafaklarda yüzen al sancak;
             
             Sönmeden yurdumun üstünde tüten en son ocak.
             O benim milletimin yıldızıdır, parlayacak;
@@ -346,13 +378,17 @@ class EvAsistani:
             "beni duyabiliyor musun": "Evet, seni duyabiliyorum."
         }
     def konus(self, mesaj):
+        if getattr(self, "stop_speaking", False):
+            self.stop_speaking = False
+            return
+
         print(f"{self.isim}: {mesaj}")
         try:
             if isinstance(mesaj, bytes):
                 mesaj = mesaj.decode("utf-8", errors="ignore")
             if not isinstance(mesaj, str):
                 mesaj = str(mesaj)
-            
+
             import re
             mesaj = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', mesaj)
         except Exception:
@@ -373,8 +409,17 @@ class EvAsistani:
                 pygame.mixer.music.load(temp_path)
                 pygame.mixer.music.play()
                 while pygame.mixer.music.get_busy():
+                    if getattr(self, "stop_speaking", False):
+                        try:
+                            pygame.mixer.music.stop()
+                        except Exception:
+                            pass
+                        break
                     time.sleep(0.1)
-                pygame.mixer.music.unload()
+                try:
+                    pygame.mixer.music.unload()
+                except Exception:
+                    pass
             finally:
                 try:
                     os.remove(temp_path)
@@ -385,34 +430,47 @@ class EvAsistani:
         finally:
             self.speaking = False
     def listen_loop(self):
+
         while True:
-            if getattr(self, "speaking", False) or getattr(self, "reading_haber", False):
-                time.sleep(0.2)
-                continue
             try:
+                if getattr(self, "reading_haber", False) or getattr(self, "speaking", False):
+                    try:
+                        hot = self.dinle_hotword()
+                        if hot and any(k in hot.lower() for k in ("yeter", "dur", "kes","teşekkür ederim","teşekkürler","sağol")):
+                            self.stop_reading(hot)
+                            time.sleep(0.5)
+                            continue
+                    except Exception as e:
+                        print(f"Hotword hatası: {e}")
+                        pass
+
                 komut = self.dinle()
-            except Exception:
+            except Exception as e:
+                print(f"Dinleme hatası: {e}")
                 komut = None
 
             if not komut:
                 time.sleep(0.5)
                 continue
+            
             if isinstance(komut, str) and komut.upper() in ("ANLAŞILMADI", "ANLASILMADI", "HATA"):
                 print("Ses tanıma başarısız veya hata, tekrar dinleniyor...")
                 time.sleep(0.5)
                 continue
+            
             if hasattr(self, "gui"):
                 try:
-                    self.gui.mesaj_ekle("Siz (sesli)", komut)
+                    self.gui.root.after(0, self.gui.mesaj_ekle, "Siz (sesli)", komut)
                 except Exception:
                     pass
+            
             try:
                 self.handle_command(komut)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Komut işleme hatası: {e}")
+            
             time.sleep(0.2)
     def handle_command(self, komut):
-        """Ses komutu işlemeye yarar"""
         if getattr(self, "awaiting_youtube", None):
             try:
                 self.process_youtube_response(komut)
@@ -443,8 +501,19 @@ class EvAsistani:
             except Exception:
                 pass
             return
+        # Hatırlatıcı beklemesi
+        if getattr(self, "awaiting_hatirlatici", None):
+            try:
+                self.process_hatirlatici_response(komut)
+            except Exception:
+                pass
+            return
+        
+        # Önceden tanımlı cevaplar
         if self.onceden_tanimli_cevap_ver(komut):
             return
+
+        # Keyword triggers (haber, ara, müzik vb.)
         try:
             komut_lower = (komut or "").lower()
             for kw, func in getattr(self, "keyword_triggers", {}).items():
@@ -456,6 +525,8 @@ class EvAsistani:
                     return
         except Exception:
             pass
+
+        # Komutlar sözlüğü
         for anahtar, fonksiyon in self.komutlar.items():
             if anahtar in komut.lower():
                 try:
@@ -466,7 +537,79 @@ class EvAsistani:
                     except Exception:
                         pass
                 return
+
         self.konus("Bu komutu anlayamadım. Tekrar söyleyebilir misin?")
+    def stop_reading(self, komut=None):
+        print("Okuma durduruldu, beni dinlemeye hazır...")
+        
+        self.stop_speaking = True
+        self.reading_haber = False
+        self.awaiting_haber_detayi = False  
+        try:
+            pygame.mixer.music.stop()
+            pygame.mixer.music.unload()
+        except Exception:
+            pass
+        
+
+        if hasattr(self, "gui"):
+            try:
+                self.gui.root.after(0, self.gui.mesaj_ekle, self.isim, "Seni dinliyorum, ne diyeceksin?")
+            except Exception:
+                pass
+        else:
+            print(f"{self.isim}: Seni dinliyorum, ne diyeceksin?")
+
+        time.sleep(0.3)
+    def process_haber_detayi_response(self, komut):
+        try:
+            if not komut:
+                return
+            text = str(komut).strip().lower()
+            
+
+            if text in ("hayır", "hayir", "iptal", "vazgeç", "vazgec", "olmaz", "yok"):
+                self.konus("Tamam. Başka ne yapabilirim?")
+                self.awaiting_haber_detayi = False  
+                return
+
+            try:
+                num = int(text.split()[0])
+                if 1 <= num <= len(self.links):
+                    self.haberi_detayli_oku(num)
+                    self.awaiting_haber_detayi = False 
+                    return
+            except (ValueError, IndexError):
+                pass
+            
+
+            self.konus("Haber numarası veya 'hayır' söyleyin.")
+            
+        except Exception as e:
+            self.konus(f"Haber detayı işleme hatası: {e}")
+            self.awaiting_haber_detayi = False
+    def dinle_hotword(self):
+     
+        sr_recognizer = sr.Recognizer()
+        sr_recognizer.energy_threshold = 3000
+        fs = 44100
+        saniye = 0.5  
+        try:
+            ses = sd.rec(int(saniye * fs), samplerate=fs, channels=1, dtype=np.int16)
+            sd.wait(timeout=1)
+            ses = np.asarray(ses, dtype=np.float32)
+            ses = ses / 32768.0
+            audio_data = sr.AudioData((ses * 32768).astype(np.int16).tobytes(), fs, 2)
+            try:
+                text = sr_recognizer.recognize_google(audio_data, language="tr-TR")
+                return text.lower()
+            except sr.UnknownValueError:
+                return None
+            except sr.RequestError:
+                return None
+        except Exception:
+            return None
+
     def hava_durumu_google(self, sehir="Bilecik"):
         import requests
         from requests.adapters import HTTPAdapter
@@ -600,12 +743,32 @@ class EvAsistani:
                 data = json.load(f)
                 self.gorevler = data.get("gorevler", [])
                 self.alisveris_listesi = data.get("alisveris", [])
-                self.notlar = data.get("notlar", [])
+
+    def stop_reading(self, komut=None):
+        
+
+        self.stop_speaking = True
+
+        self.reading_haber = False
+        self.awaiting_haber_detayi = None
+
+        try:
+            pygame.mixer.music.stop()
+        except Exception:
+            pass
+        if hasattr(self, "gui"):
+            try:
+                self.gui.root.after(0, self.gui.mesaj_ekle, "Sistem", "Haber okuma durduruldu.")
+            except Exception:
+                pass
+        else:
+            print("Haber okuma durduruldu.")
+
     def haberi_detayli_oku(self, index):
         import requests
         from bs4 import BeautifulSoup
         import json, re
-        from urllib.parse import urljoin, urlparse, quote_plus
+        from urllib.parse import urljoin, urlparse, quote_plus, unquote
         import webbrowser, time
         if not hasattr(self, "links") or index < 1 or index > len(self.links):
             self.konus("Geçersiz haber numarası.")
@@ -622,6 +785,12 @@ class EvAsistani:
         headline = None
         try:
             headline = (self.haber_basliklari[index - 1] if hasattr(self, "haber_basliklari") else None)
+        except Exception:
+            headline = None
+        headline = None
+        try:
+            if hasattr(self, "haber_basliklari"):
+                headline = self.haber_basliklari[index - 1]
         except Exception:
             headline = None
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -751,39 +920,61 @@ class EvAsistani:
             return None, None
         try:
             soup, final_url = fetch_soup(start_url)
+            soup, final_url = fetch_soup(start_url)
             domain = urlparse(final_url).netloc.lower() if final_url else urlparse(start_url).netloc.lower()
+            parsed = urlparse(final_url or start_url)
+            path = (parsed.path or "").strip("/")
+            if (not path or path == "") and headline:
+                try:
+                    q = f"site:{domain} {headline}"
+                    r = requests.post("https://html.duckduckgo.com/html/", data={"q": q}, headers=headers, timeout=10)
+                    if r.status_code == 200:
+                        so = BeautifulSoup(r.text, "html.parser")
+                        found = None
+                        for a in so.find_all("a", href=True):
+                            h = a["href"].strip()
+                            if h.startswith("/"):
+                                h = urljoin(f"https://{domain}", h)
+                            if h.startswith("http") and domain in urlparse(h).netloc:
+                                found = h
+                                break
+                        if found:
+                            soup, final_url = fetch_soup(found)
+                            domain = urlparse(final_url).netloc.lower() if final_url else domain
+                except Exception:
+                    pass
             if "bigpara" in domain or "hurriyet" in domain and "bigpara" in start_url:
-                text = extract_bigpara(soup)
-                if not text:
-                    amp_text, amp_url = try_amp_variants(final_url or start_url)
-                    if amp_text:
-                        speak_and_show(amp_text, amp_url)
-                        return
-                    text = general_extract(soup)
-                if text and len(text) > 200:
-                    speak_and_show(text, final_url)
-                    return
-                if headline:
-                    try:
-                        q = f"site:{domain} {headline}"
-                        r = requests.post("https://html.duckduckgo.com/html/", data={"q": q}, headers=headers, timeout=10)
-                        if r.status_code == 200:
-                            so = BeautifulSoup(r.text, "html.parser")
-                            found = None
-                            for a in so.find_all("a", href=True):
-                                h = a["href"].strip()
-                                if domain in h and h.startswith("http"):
-                                    found = h
-                                    break
-                            if found:
-                                s2, f2 = fetch_soup(found)
-                                if s2:
-                                    t2 = extract_bigpara(s2) or general_extract(s2)
-                                    if t2 and len(t2) > 200:
-                                        speak_and_show(t2, f2)
-                                        return
-                    except Exception:
-                        pass
+                 text = extract_bigpara(soup)
+                 if not text:
+                     amp_text, amp_url = try_amp_variants(final_url or start_url)
+                     if amp_text:
+                         speak_and_show(amp_text, amp_url)
+                         return
+                     text = general_extract(soup)
+                 if text and len(text) > 200:
+                     speak_and_show(text, final_url)
+                     return
+                 if headline:
+                     try:
+                         q = f"site:{domain} {headline}"
+                         r = requests.post("https://html.duckduckgo.com/html/", data={"q": q}, headers=headers, timeout=10)
+                         if r.status_code == 200:
+                             so = BeautifulSoup(r.text, "html.parser")
+                             found = None
+                             for a in so.find_all("a", href=True):
+                                 h = a["href"].strip()
+                                 if domain in h and h.startswith("http"):
+                                     found = h
+                                     break
+                             if found:
+                                 s2, f2 = fetch_soup(found)
+                                 if s2:
+                                     t2 = extract_bigpara(s2) or general_extract(s2)
+                                     if t2 and len(t2) > 200:
+                                         speak_and_show(t2, f2)
+                                         return
+                     except Exception:
+                         pass
             text = general_extract(soup)
             if text and len(text) > 200:
                 speak_and_show(text, final_url)
@@ -827,6 +1018,7 @@ class EvAsistani:
         except Exception as e:
             self.konus(f"Haber detayları alınamadı: {e}")
             return
+
     def ilac_hatirlat(self, komut=None):
         metin = (komut or "").lower().strip()
         metin = metin.replace("ilacı hatırlat", "").strip()
@@ -1159,14 +1351,7 @@ class EvAsistani:
             webbrowser.open("https://www.doviz.com/altin/gram-altin")
         except:
             pass
-    def muzik_youtube_ac(self, komut=None):
-        import webbrowser
-        self.konus("YouTube'da müzik açılıyor...")
-        query = "müzik"
-        if komut and "müzik" in komut:
-            query = komut.replace("müzik açabilir misin", "").strip() or "müzik"
-        search_url = f"https://www.youtube.com/results?search_query={query.replace(' ', '+')}"
-        webbrowser.open(search_url)
+    
     def bugun_ne_var(self): 
         import requests
         from bs4 import BeautifulSoup
@@ -1217,6 +1402,7 @@ class EvAsistani:
             except Exception:
                 pass
             return link
+
         def resolve_possible_original(link):
             if not link:
                 return link
@@ -1258,6 +1444,7 @@ class EvAsistani:
             except Exception:
                 pass
             return final
+
         def worker():
             headlines = []
             links = []
@@ -1341,51 +1528,35 @@ class EvAsistani:
             try:
                 self.konus("Günün öne çıkan haberleri:")
                 for i, h in enumerate(self.haber_basliklari, 1):
+                    if getattr(self, "stop_speaking", False):
+                        self.stop_speaking = False
+                        break
                     self.konus(f"{i}. {h}")
                     time.sleep(0.15)
-                kaynak_mesaji = "Kaynak linkleri:\n"
-                for i, link in enumerate(self.links, 1):
-                    kaynak_mesaji += f"{i}. {link or 'Bulunamadı'}\n"
-                if hasattr(self, "gui"):
-                    try:
-                        self.gui.root.after(0, self.gui.mesaj_ekle, self.isim, kaynak_mesaji)
-                    except Exception:
-                        pass
+                
+
+                if not getattr(self, "stop_speaking", False):
+                    kaynak_mesaji = "Kaynak linkleri:\n"
+                    for i, link in enumerate(self.links, 1):
+                        kaynak_mesaji += f"{i}. {link or 'Bulunamadı'}\n"
+                    if hasattr(self, "gui"):
+                        try:
+                            self.gui.root.after(0, self.gui.mesaj_ekle, self.isim, kaynak_mesaji)
+                        except Exception:
+                            pass
+                    else:
+                        print(kaynak_mesaji)
+                    self.konus("Detaylı okumamı istediğiniz haber numarası var mı? (örn. 2 veya 'hayır')")
+                    self.awaiting_haber_detayi = True
                 else:
-                    print(kaynak_mesaji)
-                self.konus("Detaylı okumamı istediğiniz haber numarası var mı? (örn. 2 veya 'hayır')")
+                    self.stop_speaking = False
             finally:
                 self.reading_haber = False
-                self.awaiting_haber_detayi = True
+                if getattr(self, "stop_speaking", False):
+                    self.stop_speaking = False
 
         threading.Thread(target=worker, daemon=True).start()
-    def process_haber_detayi_response(self, cevap):
-        try:
-            if not cevap:
-                return
-            txt = str(cevap).strip().lower()
-            if txt in ("hayır", "hayir", "h", "no"):
-                self.konus("Tamam, detay istemediniz.")
-                self.awaiting_haber_detayi = None
-                return
-            import re
-            m = re.search(r'(\d+)', txt)
-            if m:
-                idx = int(m.group(1))
-                if not hasattr(self, "links") or idx < 1 or idx > len(self.links):
-                    self.konus("Geçersiz haber numarası.")
-                    return
-
-                link = self.links[idx - 1]
-                self.konus(f"{idx}. haberi açıyorum...")
-                threading.Thread(target=self.haberi_detayli_oku, args=(idx,), daemon=True).start()
-                return
-
-            self.konus("Geçersiz seçim. Bir numara yazın veya 'hayır' deyin.")
-        except Exception as e:
-            self.konus(f"Haber yanıtı işlenemedi: {e}")
     def dinle(self):
-        """Ses tanıma — mikrofon kaydı ve Google API"""
         sr_recognizer = sr.Recognizer()
         sr_recognizer.energy_threshold = 4000
         fs = 44100  
@@ -1414,19 +1585,30 @@ class EvAsistani:
         except Exception as e:
             print(f"Dinleme hatası: {e}")
             return "HATA"
-    def sohbet_et(self, mesaj):
-        try:
-            from openai import OpenAI
-            client = OpenAI(api_key="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")
+    
+    def sohbet_et(self, komut=None):
+        user_text = komut or self.gui.giris.get()
+        self.gui.giris.delete(0, "end")
 
-            yanit = client.chat.completions.create(
-                model="gpt-oss-20b",  
-                messages=[{"role": "user", "content": mesaj}]
+    # Mesajı kaydet
+        self.messages.append({"role": "user", "content": user_text})
+
+        try:
+            completion = self.client.chat.completions.create(
+                model="meta-llama/Llama-3.2-3B-Instruct:novita",
+                messages=self.messages,
             )
-            cevap = yanit.choices[0].message.content
-            self.konus(cevap)
+
+            # Nokta ile content al
+            reply = completion.choices[0].message.content
+
+            # Cevabı kaydet (multi-turn için)
+            self.messages.append({"role": "assistant", "content": reply})
+            self.konus(reply)
+
         except Exception as e:
-            print("Hata:", e)
+            self.konus("Üzgünüm, yanıt alınamadı: " + str(e))
+
     def onceden_tanimli_cevap_ver(self, komut):
         for anahtar, cevap in self.onceden_tanimli_cevaplar.items():
             if anahtar in komut:
@@ -1435,6 +1617,113 @@ class EvAsistani:
         return False
     def selamla(self):
         self.konus("Merhaba! Sana nasıl yardımcı olabilirim?")
+    # ...existing code...
+    def muzik_ac(self, komut=None):
+        # Sadece masaüstünün kökündeki mp3 dosyalarını listele (alt klasörleri dahil etme)
+        desktop = os.path.join(os.path.expanduser("~"), "Desktop")
+        mp3s = []
+        try:
+            for f in os.listdir(desktop):
+                p = os.path.join(desktop, f)
+                if os.path.isfile(p) and f.lower().endswith(".mp3"):
+                    mp3s.append(p)
+        except Exception:
+            pass
+        if not mp3s:
+            self.konus("Masaüstünde mp3 dosyası bulunamadı.")
+            return
+        self.muzik_list = mp3s
+        isimler = [os.path.splitext(os.path.basename(p))[0] for p in mp3s]
+        mesaj = "Masaüstündeki şarkılar:\n" + "\n".join(f"{i+1}. {n}" for i, n in enumerate(isimler))
+        self.konus(mesaj)
+        self.konus("Hangi müziği açmamı istiyorsun? İsim ya da numara söyle.")
+        self.awaiting_muzik = True
+    def process_muzik_response(self, cevap):
+        if not getattr(self, "awaiting_muzik", False):
+            return
+        if not cevap:
+            return
+        import re
+        text = str(cevap).strip().lower()
+        if text in ("hayır", "hayir", "iptal", "vazgeç", "vazgec", "olmaz"):
+            self.konus("Tamam, müzik seçimi iptal edildi.")
+            self.awaiting_muzik = False
+            return
+
+        def text_to_number(s):
+            # Basit Türkçe sayı/ordinal -> int dönüştürücü
+            s = s.lower()
+            tokens = re.findall(r"[\wçğıöşü]+", s, flags=re.UNICODE)
+            mapping = {
+                "bir": 1, "iki": 2, "üç": 3, "uc": 3, "dört": 4, "dort": 4,
+                "beş": 5, "bes": 5, "altı": 6, "alti": 6, "yedi": 7,
+                "sekiz": 8, "dokuz": 9, "on": 10, "onbir": 11, "on iki": 12
+            }
+            for t in tokens:
+                if t.isdigit():
+                    try:
+                        return int(t)
+                    except:
+                        pass
+                if t in mapping:
+                    return mapping[t]
+                for k, v in mapping.items():
+                    if t.startswith(k):
+                        return v
+            return None
+
+        sel = None
+        num = None
+        try:
+            num = int(text.split()[0])
+        except Exception:
+            num = text_to_number(text)
+
+        if isinstance(num, int) and 1 <= num <= len(getattr(self, "muzik_list", [])):
+            sel = self.muzik_list[num - 1]
+
+        if sel is None:
+            for p in getattr(self, "muzik_list", []):
+                name = os.path.splitext(os.path.basename(p))[0].lower()
+                if text in name or any(tok in name for tok in text.split()):
+                    sel = p
+                    break
+
+        if sel is None:
+            self.konus("Seçiminizi anlayamadım. Lütfen numara veya tam/parsiyel isim söyleyin.")
+            return
+
+        # Önce sesli olarak söylüyoruz, TTS bitince dosyayı yükleyip çalacağız
+        try:
+            mesaj = f"Çalıyor: {os.path.basename(sel)}. Müzik kapatmak için 'kapat' veya 'müziği kapat' söyleyin."
+            self.konus(mesaj)
+        except Exception:
+            pass
+
+        try:
+            pygame.mixer.music.load(sel)
+            pygame.mixer.music.play()
+            self.current_music = sel
+        except Exception as e:
+            self.konus(f"Müzik çalınamadı: {e}")
+        finally:
+            self.awaiting_muzik = False
+
+    def muzik_kapat(self, komut=None):
+        try:
+            pygame.mixer.music.stop()
+            try:
+                pygame.mixer.music.unload()
+            except Exception:
+                pass
+            if hasattr(self, "current_music"):
+                ad = os.path.basename(self.current_music)
+                self.konus(f"{ad} durduruldu.")
+                del self.current_music
+            else:
+                self.konus("Müzik durduruldu.")
+        except Exception as e:
+            self.konus(f"Müzik kapatılamadı: {e}")
     def saat_soyle(self):
         self.konus("Şu an saat: " + datetime.datetime.now().strftime("%H:%M"))
         try:
@@ -1487,17 +1776,16 @@ class EvAsistani:
         else:
             self.konus("Hiç görev eklenmemiş.")
     def alisveris_ekle(self):
-        """Alışveriş ürünü almaya başla - kullanıcı dinlenecek"""
+        # Kullanıcıdan ürün ismini alabilmek için beklemeye geç
         self.konus("Ne almak istiyorsunuz? Ürün adını söyleyin.")
         self.awaiting_alisveris = True
-    def process_alisveris_response(self, cevap):
-        """Sesli alışveriş girişini işle"""
+        return
         try:
             if not cevap:
                 return
             text = str(cevap).strip()
             lower = text.lower()
-            if lower in ("hayır", "hayir", "iptal", "vazgeç", "vazgec", "olmaz"):
+            if lower in ("hayır", "hayir", "iptal", "vazgeç", "vazgec", "olmaz","istemiyorum"):
                 self.konus("Tamam, alışveriş eklemeyi iptal ettim.")
                 self.awaiting_alisveris = False
                 return
@@ -1508,6 +1796,28 @@ class EvAsistani:
         except Exception as e:
             self.konus(f"Alışveriş işleme hatası: {e}")
             self.awaiting_alisveris = False  
+        # Kullanıcıdan ürün ismini alabilmek için beklemeye geç
+        self.konus("Ne almak istiyorsunuz? Ürün adını söyleyin.")
+        self.awaiting_alisveris = True
+        return
+
+    def process_alisveris_response(self, komut):
+        try:
+            if not komut:
+                return
+            text = str(komut).strip()
+            lower = text.lower()
+            if lower in ("hayır", "hayir", "iptal", "vazgeç", "vazgec", "olmaz"):
+                self.konus("Tamam, alışveriş eklemeyi iptal ettim.")
+                self.awaiting_alisveris = False
+                return
+            self.alisveris_listesi.append(text)
+            self.hafizayi_kaydet()
+            self.konus(f"'{text}' alışveriş listenize eklendi.")
+            self.awaiting_alisveris = False
+        except Exception as e:
+            self.konus(f"Alışveriş işleme hatası: {e}")
+            self.awaiting_alisveris = False
     def alisveris_goster(self):
         if self.alisveris_listesi:
             self.konus("Alışveriş listeniz şunlar:")
@@ -1562,12 +1872,151 @@ class EvAsistani:
                 self.konus(icerik)
         else:
             self.konus("Dosya bulunamadı.")
+    def hatirlatici_kur(self, komut=None):
+        """Hatırlatıcı kurulum başlangıcı"""
+        self.konus("Neyi hatırlatayım? Söyleyin. (Örn: Kardeşimin doğum günü, Toplantı, Spor antrenmanı vb.)")
+        self.awaiting_hatirlatici = True
+        self.hatirlatici_step = 1  # 1. adım: konu al
+        self.hatirlatici_konu = None
+        return
+
+    def process_hatirlatici_response(self, komut):
+        """Hatırlatıcı yanıt işleme"""
+        import re
+        import datetime
+        import threading
+        
+        try:
+            if not komut:
+                return
+            
+            text = str(komut).strip()
+            lower = text.lower()
+            
+            # İptal seçenekleri
+            if lower in ("hayır", "hayir", "iptal", "vazgeç", "vazgec", "olmaz"):
+                self.konus("Tamam, hatırlatıcı kurulumu iptal edildi.")
+                self.awaiting_hatirlatici = False
+                self.hatirlatici_step = None
+                self.hatirlatici_konu = None
+                return
+            
+            step = getattr(self, "hatirlatici_step", None)
+            
+            # 1. Adım: Konuyu al
+            if step == 1:
+                self.hatirlatici_konu = text
+                self.konus(f"'{text}' için — Saat kaçta hatırlatayım? (Örn: '8', '14:30', 'yarın 8', 'pazartesi 9' vb.)")
+                self.hatirlatici_step = 2
+                self.awaiting_hatirlatici = True
+                return
+            
+            # 2. Adım: Saati parse et ve hatırlatıcıyı kur
+            if step == 2:
+                konu = self.hatirlatici_konu or "Hatırlatıcı"
+                
+                # Saat parsing
+                def parse_time_advanced(s):
+                    """Saat, 'yarın X', 'pazartesi X' vb. formatları parse eder"""
+                    s_lower = s.lower()
+                    
+                    # "yarın 8", "yarın 14:30" vb.
+                    if "yarın" in s_lower or "yarin" in s_lower:
+                        m = re.search(r'(\d{1,2})\s*[:\.]\s*(\d{1,2})|(\d{1,2})(?=\D*$)', s)
+                        if m:
+                            h = int(m.group(1) or m.group(3))
+                            mi = int(m.group(2)) if m.group(2) else 0
+                            delta_days = 1
+                            return (h, mi, delta_days, "yarın")
+                    
+                    # "pazartesi 9", "salı 10:30" vb.
+                    gun_map = {
+                        "pazartesi": 0, "salı": 1, "çarşamba": 2, "perşembe": 3,
+                        "cuma": 4, "cumartesi": 5, "pazar": 6,
+                        "sali": 1, "carsamba": 2, "persembe": 3, "cumartesi": 5
+                    }
+                    for gun_tr, gun_idx in gun_map.items():
+                        if gun_tr in s_lower:
+                            m = re.search(r'(\d{1,2})\s*[:\.]\s*(\d{1,2})|(\d{1,2})(?=\D*$)', s)
+                            if m:
+                                h = int(m.group(1) or m.group(3))
+                                mi = int(m.group(2)) if m.group(2) else 0
+                                today_idx = datetime.datetime.now().weekday()
+                                delta = (gun_idx - today_idx) % 7
+                                if delta == 0:
+                                    delta = 7  # Eğer bugün o gün ise, gelecek hafta o gün
+                                return (h, mi, delta, gun_tr)
+                    
+                    # Sadece saat: "8", "14:30"
+                    m = re.search(r'(\d{1,2})\s*[:\.]\s*(\d{1,2})|(\d{1,2})(?=\D*$)', s)
+                    if m:
+                        h = int(m.group(1) or m.group(3))
+                        mi = int(m.group(2)) if m.group(2) else 0
+                        return (h, mi, 0, None)  # Bugün, delta=0
+                    
+                    return None
+                
+                parsed = parse_time_advanced(text)
+                if not parsed:
+                    self.konus("Saati anlayamadım. Lütfen örnek: '8', '14:30', 'yarın 9', 'pazartesi 10' gibi söyleyin.")
+                    return
+                
+                hour, minute, delta_days, day_info = parsed
+                
+                # Saat geçerliliği
+                if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+                    self.konus("Geçersiz saat bilgisi. 0-23 arası saat ve 0-59 arası dakika girin.")
+                    return
+                
+                # Target zamanı hesapla
+                now = datetime.datetime.now()
+                target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                
+                if delta_days > 0:
+                    target = target + datetime.timedelta(days=delta_days)
+                elif target <= now:
+                    target = target + datetime.timedelta(days=1)
+                
+                delta_seconds = (target - now).total_seconds()
+                
+                # Hatırlatıcı timer'ı kur
+                def hatirlatici_callback():
+                    try:
+                        self.konus(f"Hatırlatıcı: {konu}")
+                    except Exception:
+                        pass
+                
+                timer = threading.Timer(delta_seconds, hatirlatici_callback)
+                timer.daemon = True
+                timer.start()
+               
+                # Metadata kaydet
+                self.hatirlatici_timer = timer
+                self.hatirlatici_time = target.isoformat()
+                
+                # Kullanıcıya onay mesajı
+                gun_str = day_info if day_info else "bugün"
+                mesaj = f"Tamam. '{konu}' için {gun_str} saat {hour:02d}:{minute:02d} hatırlatması ayarlandı."
+                mesaj += f"\n(İlk hatırlatma: {target.strftime('%Y-%m-%d %H:%M')})"
+                self.konus(mesaj)
+                
+                # Durumu sıfırla
+                self.awaiting_hatirlatici = False
+                self.hatirlatici_step = None
+                self.hatirlatici_konu = None
+                return
+        
+        except Exception as e:
+            self.konus(f"Hatırlatıcı kurulum hatası: {e}")
+            self.awaiting_hatirlatici = False
+            self.hatirlatici_step = None
+            self.hatirlatici_konu = None
     def not_al(self):
-        """Not almaya başla - kullanıcı dinlenecek"""
+
         self.konus("Hangi notu almak istiyorsunuz? Söyleyin.")
         self.awaiting_not = True  
     def process_not_response(self, cevap):
-        """Sesli not girişini işle"""
+
         try:
             if not cevap:
                 return
@@ -1598,14 +2047,6 @@ class EvAsistani:
             "Programcı neden denize girmez? Çünkü overflow olur!"
         ]
         self.konus(random.choice(s))
-    def zamanlayici(self):
-        sure = self.gui.giris.get()
-        self.gui.giris.delete(0, tk.END)
-        if sure.isdigit():
-            self.konus(f"{sure} saniye için zamanlayıcı başlatıldı")
-            self.gui.root.after(int(sure) * 1000, lambda: self.konus("Süre doldu!"))
-        else:
-            self.konus("Geçersiz süre girdiniz.")
     def alarm_kur(self):
         saat = input("Alarm saatini HH:MM formatında girin: ")
         self.konus(f"{saat} için alarm kuruldu (simüle edildi).")
