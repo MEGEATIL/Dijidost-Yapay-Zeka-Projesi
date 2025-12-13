@@ -109,7 +109,7 @@ class EvAsistani:
         self.alisveris_listesi = []
         self.client = OpenAI(
             base_url="https://router.huggingface.co/v1",
-            api_key="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",
+            api_key*****************************",
         )
         self.notlar = []
         self.recognizer = sr.Recognizer()
